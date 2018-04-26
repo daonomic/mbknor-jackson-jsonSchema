@@ -1,19 +1,20 @@
 package com.kjetland.jackson.jsonSchema
 
+import java.lang.annotation.Annotation
 import java.util
 import java.util.Optional
 import java.util.function.Supplier
-import javax.validation.constraints._
 
 import com.fasterxml.jackson.annotation.{JsonPropertyDescription, JsonSubTypes, JsonTypeInfo}
 import com.fasterxml.jackson.core.JsonParser.NumberType
 import com.fasterxml.jackson.databind._
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
-import com.fasterxml.jackson.databind.jsonFormatVisitors._
 import com.fasterxml.jackson.databind.introspect.AnnotatedClass
+import com.fasterxml.jackson.databind.jsonFormatVisitors._
 import com.fasterxml.jackson.databind.node.{ArrayNode, JsonNodeFactory, ObjectNode}
 import com.kjetland.jackson.jsonSchema.annotations._
 import io.github.lukehutch.fastclasspathscanner.FastClasspathScanner
+import javax.validation.constraints._
 import org.slf4j.LoggerFactory
 
 object JsonSchemaGenerator {
@@ -717,27 +718,12 @@ class JsonSchemaGenerator
       _type
     }
 
-    private def injectFromJsonSchemaInject(a:JsonSchemaInject, thisObjectNode:ObjectNode): Unit ={
-      // Must parse json
-      val injectJsonNode = objectMapper.readTree(a.json())
-      Option(a.jsonSupplier())
-        .flatMap(cls => Option(cls.newInstance().get()))
-        .foreach(json => merge(injectJsonNode, json))
-      if (a.jsonSupplierViaLookup().nonEmpty) {
-        val json = config.jsonSuppliers.get(a.jsonSupplierViaLookup()).getOrElse(throw new Exception(s"@JsonSchemaInject(jsonSupplierLookup='${a.jsonSupplierViaLookup()}') does not exist in config.jsonSupplierLookup-map")).get()
-        merge(injectJsonNode, json)
+    private def injectJsonSchema(annotations: Iterable[Annotation], thisObjectNode: ObjectNode): Unit = {
+      annotations.foreach { a =>
+        Option(a.annotationType().getAnnotation(classOf[JsonSchemaInjectorClass]))
+          .map(_.value().newInstance().asInstanceOf[JsonSchemaInjector[Annotation]])
+          .foreach(injector => injector.inject(thisObjectNode, objectMapper, config, a))
       }
-      a.strings().foreach(v => injectJsonNode.visit(v.path(), (o, n) => o.put(n, v.value())))
-      a.ints().foreach(v => injectJsonNode.visit(v.path(), (o, n) => o.put(n, v.value())))
-      a.bools().foreach(v => injectJsonNode.visit(v.path(), (o, n) => o.put(n, v.value())))
-
-      if ( !a.merge()) {
-        // Since we're not merging, we must remove all content of thisObjectNode before injecting.
-        // We cannot just "replace" it with injectJsonNode, since thisObjectNode already have been added to its parent
-        thisObjectNode.removeAll()
-      }
-
-      merge(thisObjectNode, injectJsonNode)
     }
 
     override def expectObjectFormat(_type: JavaType) = {
@@ -821,11 +807,7 @@ class JsonSchemaGenerator
             }
 
             // Optionally add JsonSchemaInject
-            Option(ac.getAnnotations.get(classOf[JsonSchemaInject])).foreach {
-              a =>
-                injectFromJsonSchemaInject(a, thisObjectNode)
-            }
-
+            injectJsonSchema(ac.getRawType.getAnnotations, thisObjectNode)
 
             val propertiesNode = JsonNodeFactory.instance.objectNode()
             thisObjectNode.set("properties", propertiesNode)
@@ -1017,17 +999,10 @@ class JsonSchemaGenerator
                 }
 
                 // Optionally add JsonSchemaInject
-                prop.flatMap {
+                prop.foreach {
                   p:BeanProperty =>
-                    Option(p.getAnnotation(classOf[JsonSchemaInject])) match {
-                      case Some(a) => Some(a)
-                      case None =>
-                        // Try to look at the class itself -- Looks like this is the only way to find it if the type is Enum
-                        Option(p.getType.getRawClass.getAnnotation(classOf[JsonSchemaInject]))
-                    }
-                }.foreach {
-                  a =>
-                    injectFromJsonSchemaInject(a, thisPropertyNode.meta)
+                    injectJsonSchema(p.getMember.annotations().asScala, thisPropertyNode.meta)
+                    injectJsonSchema(p.getType.getRawClass.getAnnotations, thisPropertyNode.meta)
                 }
               }
 
@@ -1077,29 +1052,6 @@ class JsonSchemaGenerator
 
     }
 
-  }
-
-  private def merge(mainNode:JsonNode, updateNode:JsonNode):Unit = {
-    val fieldNames = updateNode.fieldNames()
-    while (fieldNames.hasNext) {
-
-      val fieldName = fieldNames.next()
-      val jsonNode = mainNode.get(fieldName)
-      // if field exists and is an embedded object
-      if (jsonNode != null && jsonNode.isObject) {
-        merge(jsonNode, updateNode.get(fieldName))
-      }
-      else {
-        mainNode match {
-          case node: ObjectNode =>
-            // Overwrite field
-            val value = updateNode.get(fieldName)
-            node.set(fieldName, value)
-          case _ =>
-        }
-      }
-
-    }
   }
 
   def generateTitleFromPropertyName(propertyName:String):String = {
@@ -1234,17 +1186,5 @@ class JsonSchemaGenerator
 
     rootNode
 
-  }
-
-  implicit class JsonNodeExtension(o:JsonNode) {
-    def visit(path: String, f: (ObjectNode, String) => Unit) = {
-      var p = o
-
-      val split = path.split('/')
-      for (name <- split.dropRight(1)) {
-        p = Option(p.get(name)).getOrElse(p.asInstanceOf[ObjectNode].putObject(name))
-      }
-      f(p.asInstanceOf[ObjectNode], split.last)
-    }
   }
 }

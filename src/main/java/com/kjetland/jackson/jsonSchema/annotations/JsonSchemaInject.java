@@ -1,6 +1,7 @@
 package com.kjetland.jackson.jsonSchema.annotations;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.kjetland.jackson.jsonSchema.DefaultJsonSchemaInjector;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.Target;
@@ -14,6 +15,7 @@ import static java.lang.annotation.RetentionPolicy.RUNTIME;
  */
 @Target({METHOD, FIELD, PARAMETER, TYPE})
 @Retention(RUNTIME)
+@JsonSchemaInjectorClass(DefaultJsonSchemaInjector.class)
 public @interface JsonSchemaInject {
     /**
      * @return a raw json that will be merged on top of the generated jsonSchema
